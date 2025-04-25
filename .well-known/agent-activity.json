@@ -1,0 +1,1 @@
+{"name": "Activity Recommendation Agent", "description": "Suggests activities based on location and context", "version": "1.0.0", "authentication": {"type": "bearer", "description": "JWT Bearer token required for authentication"}, "skills": [{"name": "suggestActivities", "description": "Get activity recommendations for a specific location"}]}

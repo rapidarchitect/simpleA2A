@@ -5,115 +5,140 @@
 #   "python_a2a[all]",
 #   "fastapi",
 #   "pydantic",
-#   "asyncio",
 #   "python-jose[cryptography]",
 #   "python-dotenv"
 # ]
 # ///
 
-import asyncio
+from python_a2a import A2AServer, Message, TextContent, MessageRole, run_server
+from fastapi import HTTPException, Security, Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import jwt, JWTError
 import os
-from datetime import datetime, timedelta
-from jose import jwt
 from dotenv import load_dotenv
-from python_a2a import A2AClient, Message, TextContent, MessageRole
-import httpx
+import json
+from functools import wraps
+from typing import Dict, List
 
 load_dotenv()
 
-class AuthenticatedA2AClient(A2AClient):
-    def __init__(self, url: str, jwt_token: str = None):
-        self.url = url
-        self.headers = {"Authorization": f"Bearer {jwt_token}"} if jwt_token else {}
+security = HTTPBearer()
+SECRET_KEY = os.getenv('JWT_SECRET_KEY')
+ALGORITHM = "HS256"
 
-    async def send_message(self, message: Message) -> Message:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.url}/messages",
-                json=message.dict(),
-                headers=self.headers
+# Activity database
+ACTIVITIES: Dict[str, List[str]] = {
+    "new york": [
+        "Visit Central Park",
+        "Explore Times Square",
+        "Visit the Metropolitan Museum of Art",
+        "Take a walk on the High Line",
+        "See a Broadway show"
+    ],
+    "tokyo": [
+        "Visit Senso-ji Temple",
+        "Explore Shibuya Crossing",
+        "Tour the Imperial Palace",
+        "Shop in Harajuku",
+        "Experience the Robot Restaurant"
+    ]
+}
+
+class AuthenticatedActivityAgent(A2AServer):
+    def __init__(self):
+        super().__init__()
+        if not SECRET_KEY:
+            raise ValueError("JWT_SECRET_KEY environment variable is not set")
+
+    def verify_token(self, token: str) -> bool:
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            return True
+        except JWTError:
+            return False
+
+    def handle_message(self, message: Message) -> Message:
+        """
+        Non-async version of handle_message
+        """
+        if not hasattr(message, 'content') or not hasattr(message.content, 'text'):
+            return Message(
+                content=TextContent(text="Invalid message format"),
+                role=MessageRole.AGENT,
+                parent_message_id=getattr(message, 'message_id', None),
+                conversation_id=getattr(message, 'conversation_id', None)
             )
-            response.raise_for_status()
-            return Message.parse_obj(response.json())
 
-def create_jwt_token():
-    secret_key = os.getenv('JWT_SECRET_KEY')
-    if not secret_key:
-        raise ValueError("JWT_SECRET_KEY environment variable is not set")
+        # Extract city and context from the message
+        text = message.content.text.lower()
 
-    payload = {
-        "sub": "travel_planner",
-        "name": "Travel Planning Service",
-        "exp": datetime.utcnow() + timedelta(hours=1)
+        # Find activities for the mentioned city
+        activity_list = []
+        for city, city_activities in ACTIVITIES.items():
+            if city in text:
+                activity_list = city_activities
+                break
+
+        if activity_list:
+            response_text = f"Recommended activities: {', '.join(activity_list)}"
+        else:
+            response_text = "No activity recommendations available for this location."
+
+        return Message(
+            content=TextContent(text=response_text),
+            role=MessageRole.AGENT,
+            parent_message_id=message.message_id,
+            conversation_id=message.conversation_id
+        )
+
+def create_agent_card():
+    card = {
+        "name": "Activity Recommendation Agent",
+        "description": "Suggests activities based on location and context",
+        "version": "1.0.0",
+        "authentication": {
+            "type": "bearer",
+            "description": "JWT Bearer token required for authentication"
+        },
+        "skills": [{
+            "name": "suggestActivities",
+            "description": "Get activity recommendations for a specific location"
+        }]
     }
-    return jwt.encode(payload, secret_key, algorithm="HS256")
+    os.makedirs(".well-known", exist_ok=True)
+    with open(".well-known/agent-activity.json", "w") as f:
+        json.dump(card, f)
 
-async def orchestrate_trip_planning(city):
-    # Create JWT token for activity service
-    try:
-        jwt_token = create_jwt_token()
-    except ValueError as e:
-        print(f"JWT Token creation failed: {str(e)}")
-        return "Authentication configuration error"
+class AuthMiddleware:
+    def __init__(self, app):
+        self.app = app
 
-    # Initialize clients - only activity client needs authentication
-    weather_client = A2AClient("http://localhost:5001/a2a")
-    hotel_client = A2AClient("http://localhost:5002/a2a")
-    activity_client = AuthenticatedA2AClient("http://localhost:5003/a2a", jwt_token)
+    def __call__(self, environ, start_response):
+        # Get the Authorization header
+        auth_header = environ.get('HTTP_AUTHORIZATION', '')
 
-    # 1. Get weather information
-    weather_msg = Message(content=TextContent(text=city), role=MessageRole.USER)
-    try:
-        weather_resp = await weather_client.send_message(weather_msg)
-        if hasattr(weather_resp.content, 'text'):
-            weather_info = weather_resp.content.text
-        else:
-            weather_info = "Error getting weather information"
-    except Exception as e:
-        weather_info = f"Error connecting to weather service: {str(e)}"
+        if not auth_header.startswith('Bearer '):
+            return self._unauthorized(start_response)
 
-    # 2. Get hotel information
-    hotel_msg = Message(
-        content=TextContent(text=f"Find hotels in {city} considering: {weather_info}"),
-        role=MessageRole.USER
-    )
-    try:
-        hotel_resp = await hotel_client.send_message(hotel_msg)
-        content_type = type(hotel_resp.content).__name__
-        if content_type == 'TextContent' and hasattr(hotel_resp.content, 'text'):
-            hotel_info = hotel_resp.content.text
-        else:
-            hotel_info = "Error getting hotel information"
-    except Exception as e:
-        hotel_info = f"Error connecting to hotel service: {str(e)}"
+        token = auth_header.split(' ')[1]
 
-    # 3. Suggest activities (with authentication)
-    activity_msg = Message(
-        content=TextContent(
-            text=f"Suggest activities in {city}. Weather: {weather_info}. Staying at: {hotel_info}"
-        ),
-        role=MessageRole.USER
-    )
-    try:
-        activity_resp = await activity_client.send_message(activity_msg)
-        content_type = type(activity_resp.content).__name__
-        if content_type == 'TextContent' and hasattr(activity_resp.content, 'text'):
-            activity_info = activity_resp.content.text
-        else:
-            activity_info = "Error getting activity information"
-    except Exception as e:
-        activity_info = f"Error connecting to activity service: {str(e)}"
+        if not AuthenticatedActivityAgent().verify_token(token):
+            return self._unauthorized(start_response)
 
-    # Create the final travel plan
-    return f"""
-    Travel Plan for {city}
-    ---------------------
-    Weather: {weather_info}
-    Accommodation: {hotel_info}
-    Activities: {activity_info}
-    """
+        return self.app(environ, start_response)
+
+    def _unauthorized(self, start_response):
+        start_response('401 Unauthorized', [
+            ('Content-Type', 'application/json'),
+            ('WWW-Authenticate', 'Bearer')
+        ])
+        return [b'{"detail": "Invalid authentication credentials"}']
 
 if __name__ == "__main__":
-    city = "New York"
-    result = asyncio.run(orchestrate_trip_planning(city))
-    print(result)
+    if not SECRET_KEY:
+        raise ValueError("JWT_SECRET_KEY environment variable is not set")
+
+    create_agent_card()
+
+    agent = AuthenticatedActivityAgent()
+    app = run_server(agent, host="0.0.0.0", port=5003)
