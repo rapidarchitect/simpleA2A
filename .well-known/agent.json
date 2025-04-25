@@ -1,0 +1,11 @@
+{
+  "name": "Activity Recommendation Agent",
+  "description": "Suggests activities based on location and weather",
+  "version": "1.0.0",
+  "skills": [
+    {
+      "name": "suggestActivities",
+      "description": "Suggest activities for a location based on weather and preferences"
+    }
+  ]
+}
