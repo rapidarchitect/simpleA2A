@@ -16,6 +16,8 @@ uv run each of these:
 
 ## Execution
 
+### Main acts as an orchestrator calling each agent and handling the responses and what is handed to other agents
+
 - uv run main.py
 
 ## Reference
